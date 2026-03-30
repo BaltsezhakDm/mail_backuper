@@ -169,8 +169,6 @@ class BackupRunner:
                     if not continue_on_error:
                         raise
 
-        self.apply_retention()
-
     def backup_one_account(self, account: Account) -> None:
         logging.info("Start backup for %s", account.email)
         state_path = self.local_root / "_state" / f"{account.email}.json"
