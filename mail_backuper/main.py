@@ -374,14 +374,14 @@ class BackupRunner:
         day_path = day.strftime("%Y/%m/%d")
         folder_sane = folder.replace("/", "_")
 
-        local_dir = self.local_root / account.email / day_path / folder_sane
-        local_dir.mkdir(parents=True, exist_ok=True)
-        local_file = local_dir / f"{uid}.eml"
+        # local_dir = self.local_root / account.email / day_path / folder_sane
+        # local_dir.mkdir(parents=True, exist_ok=True)
+        # local_file = local_dir / f"{uid}.eml"
 
         eml_bytes = self._to_bytes(stripped)
 
-        if not self.dry_run:
-            local_file.write_bytes(eml_bytes)
+        # if not self.dry_run:
+        #     local_file.write_bytes(eml_bytes)
 
         s3_key = f"{self.s3_prefix}/{account.email}/{day_path}/{folder_sane}/{uid}.eml"
         if not self.dry_run:
