@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -32,6 +34,119 @@ class Account:
     password: str
     imap_host: str
     imap_port: int
+
+
+class LiveProgress:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled and sys.stdout.isatty()
+        self.lock = threading.Lock()
+        self.accounts: dict[str, dict[str, Any]] = {}
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self, account_keys: list[str]) -> None:
+        if not self.enabled:
+            return
+        with self.lock:
+            self.accounts = {
+                key: {
+                    "status": "queued",
+                    "folders_done": 0,
+                    "folders_total": 0,
+                    "emails_done": 0,
+                    "emails_total": 0,
+                    "current_folder": "-",
+                    "updated_at": time.time(),
+                }
+                for key in account_keys
+            }
+        self.thread = threading.Thread(target=self._render_loop, daemon=True, name="progress")
+        self.thread.start()
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+        self._render(final=True)
+        print()
+
+    def account_started(self, account_email: str, folders_total: int) -> None:
+        self._update(
+            account_email,
+            status="running",
+            folders_total=folders_total,
+            current_folder="-",
+        )
+
+    def folder_started(self, account_email: str, folder: str, emails_total: int) -> None:
+        with self.lock:
+            data = self.accounts[account_email]
+            data["current_folder"] = folder
+            data["emails_total"] += emails_total
+            data["updated_at"] = time.time()
+
+    def uid_done(self, account_email: str) -> None:
+        with self.lock:
+            data = self.accounts[account_email]
+            data["emails_done"] += 1
+            data["updated_at"] = time.time()
+
+    def folder_done(self, account_email: str) -> None:
+        with self.lock:
+            data = self.accounts[account_email]
+            data["folders_done"] += 1
+            data["current_folder"] = "-"
+            data["updated_at"] = time.time()
+
+    def account_done(self, account_email: str) -> None:
+        self._update(account_email, status="done", current_folder="-")
+
+    def account_failed(self, account_email: str) -> None:
+        self._update(account_email, status="failed", current_folder="-")
+
+    def _update(self, account_email: str, **kwargs: Any) -> None:
+        with self.lock:
+            data = self.accounts.setdefault(account_email, {})
+            data.update(kwargs)
+            data["updated_at"] = time.time()
+
+    def _render_loop(self) -> None:
+        while not self.stop_event.wait(0.4):
+            self._render(final=False)
+
+    def _render(self, final: bool) -> None:
+        with self.lock:
+            lines = [
+                "📬 Live backup progress",
+                "─" * 102,
+                f"{'Email':40} {'Status':10} {'Folders':12} {'Emails':14} {'Current folder'}",
+                "─" * 102,
+            ]
+            for email, item in sorted(self.accounts.items()):
+                status = item.get("status", "queued")
+                status_icon = {
+                    "queued": "🕒 queued",
+                    "running": "🔄 running",
+                    "done": "✅ done",
+                    "failed": "❌ failed",
+                }.get(status, status)
+                folders = f"{item.get('folders_done', 0)}/{item.get('folders_total', 0)}"
+                emails = f"{item.get('emails_done', 0)}/{item.get('emails_total', 0)}"
+                current = str(item.get("current_folder", "-"))[:30]
+                lines.append(f"{email[:40]:40} {status_icon:10} {folders:12} {emails:14} {current}")
+            lines.append("─" * 102)
+            out = "\n".join(lines)
+
+        if final:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write(out)
+            sys.stdout.flush()
+            return
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.write(out)
+        sys.stdout.flush()
 
 
 class VaultClient:
@@ -106,7 +221,7 @@ class VaultClient:
 
 
 class BackupRunner:
-    def __init__(self, cfg: dict[str, Any], dry_run: bool = False):
+    def __init__(self, cfg: dict[str, Any], dry_run: bool = False, live_progress: bool = False):
         self.cfg = cfg
         self.tz = ZoneInfo(cfg["timezone"])
         self.now = datetime.now(tz=self.tz)
@@ -126,6 +241,7 @@ class BackupRunner:
            
         self.skip_folders = {x.lower() for x in cfg["imap"].get("skip_folders", ["Spam"])}
         self.retry_attempts = int(cfg.get("retry_attempts", 3))
+        self.progress = LiveProgress(enabled=live_progress)
 
         s3_cfg = cfg["s3"]
         self.s3_bucket = s3_cfg["bucket"]
@@ -152,22 +268,27 @@ class BackupRunner:
         vault.authenticate()
         keys = vault.list_accounts()
         logging.info("Loaded %d accounts from Vault", len(keys))
+        self.progress.start(keys)
 
         concurrency = int(self.cfg.get("concurrency", 4))
         continue_on_error = bool(self.cfg.get("limits", {}).get("continue_on_account_error", True))
 
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {
-                pool.submit(self.backup_one_account, vault.read_account(key)): key for key in keys
-            }
-            for f in as_completed(futures):
-                key = futures[f]
-                try:
-                    f.result()
-                except Exception as exc:
-                    logging.exception("Account %s failed: %s", key, exc)
-                    if not continue_on_error:
-                        raise
+        try:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {
+                    pool.submit(self.backup_one_account, vault.read_account(key)): key for key in keys
+                }
+                for f in as_completed(futures):
+                    key = futures[f]
+                    try:
+                        f.result()
+                    except Exception as exc:
+                        self.progress.account_failed(key)
+                        logging.exception("Account %s failed: %s", key, exc)
+                        if not continue_on_error:
+                            raise
+        finally:
+            self.progress.stop()
 
     def backup_one_account(self, account: Account) -> None:
         logging.info("Start backup for %s", account.email)
@@ -180,14 +301,22 @@ class BackupRunner:
             status, folders = imap.list()
             if status != "OK":
                 raise RuntimeError(f"Cannot list folders for {account.email}")
-            for folder_raw in folders:
-                folder_name = self._extract_folder_name(folder_raw.decode("utf-8", errors="ignore"))
-                if not folder_name or folder_name.lower() in self.skip_folders:
-                    continue
+            folder_names = [
+                self._extract_folder_name(folder_raw.decode("utf-8", errors="ignore"))
+                for folder_raw in folders
+            ]
+            filtered_folders = [
+                folder_name
+                for folder_name in folder_names
+                if folder_name and folder_name.lower() not in self.skip_folders
+            ]
+            self.progress.account_started(account.email, folders_total=len(filtered_folders))
+            for folder_name in filtered_folders:
                 self._backup_folder(account, imap, folder_name, state)
 
         if not self.dry_run:
             state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.progress.account_done(account.email)
         logging.info("Done backup for %s", account.email)
 
     def _backup_folder(
@@ -211,16 +340,20 @@ class BackupRunner:
             return
 
         uid_list = data[0].split() if data and data[0] else []
+        self.progress.folder_started(account.email, folder, emails_total=len(uid_list))
         if not uid_list:
+            self.progress.folder_done(account.email)
             return
 
         max_uid = last_uid
         for uid_b in uid_list:
             uid = int(uid_b.decode())
             self._backup_uid(account, imap, folder, uid)
+            self.progress.uid_done(account.email)
             max_uid = max(max_uid, uid)
 
         folder_state["last_uid"] = max_uid
+        self.progress.folder_done(account.email)
 
     def _backup_uid(self, account: Account, imap: imaplib.IMAP4_SSL, folder: str, uid: int) -> None:
         status, data = imap.uid("FETCH", str(uid), "(RFC822 INTERNALDATE)")
@@ -361,12 +494,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--live-progress",
+        action="store_true",
+        help="Show real-time table with accounts, progress and statuses",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     setup_logging(cfg)
 
-    runner = BackupRunner(cfg, dry_run=args.dry_run)
+    runner = BackupRunner(cfg, dry_run=args.dry_run, live_progress=args.live_progress)
     runner.run()
 
 
