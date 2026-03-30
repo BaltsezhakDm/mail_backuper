@@ -63,7 +63,7 @@ s3:
 - Ключи: email-адреса (`user@example.com`)
 - Значения:
   - `username`
-  - `passwordqzalminveqklfxce`
+  - `password`
   - `imap_host` (опционально, по умолчанию `imap.yandex.ru`)
   - `imap_port` (опционально, по умолчанию `993`)
 

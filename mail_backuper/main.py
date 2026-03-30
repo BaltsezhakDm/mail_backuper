@@ -211,12 +211,24 @@ class VaultClient:
         r = requests.get(url, headers=self._headers(), timeout=20)
         r.raise_for_status()
         data = r.json()["data"]["data"]
+        password = self._extract_password(account_key, data)
         return Account(
             email=account_key,
             username=data.get("username", account_key),
-            password=data["password"],
+            password=password,
             imap_host=data.get("imap_host", "imap.yandex.ru"),
             imap_port=int(data.get("imap_port", 993)),
+        )
+
+    @staticmethod
+    def _extract_password(account_key: str, data: dict[str, Any]) -> str:
+        value = data.get("password")
+        if value:
+            return str(value)
+        available = ", ".join(sorted(data.keys())) if data else "<empty>"
+        raise KeyError(
+            f"Account '{account_key}' is missing required Vault field 'password'. "
+            f"Available keys: {available}"
         )
 
 
@@ -275,9 +287,17 @@ class BackupRunner:
 
         try:
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                futures = {
-                    pool.submit(self.backup_one_account, vault.read_account(key)): key for key in keys
-                }
+                futures = {}
+                for key in keys:
+                    try:
+                        account = vault.read_account(key)
+                    except Exception as exc:
+                        self.progress.account_failed(key)
+                        logging.exception("Failed to load account %s from Vault: %s", key, exc)
+                        if not continue_on_error:
+                            raise
+                        continue
+                    futures[pool.submit(self.backup_one_account, account)] = key
                 for f in as_completed(futures):
                     key = futures[f]
                     try:
