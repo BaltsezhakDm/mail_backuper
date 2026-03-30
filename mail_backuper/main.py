@@ -312,10 +312,10 @@ class BackupRunner:
             ]
             self.progress.account_started(account.email, folders_total=len(filtered_folders))
             for folder_name in filtered_folders:
-                self._backup_folder(account, imap, folder_name, state)
+                self._backup_folder(account, imap, folder_name, state, state_path)
 
         if not self.dry_run:
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_json_atomic(state_path, state)
         self.progress.account_done(account.email)
         logging.info("Done backup for %s", account.email)
 
@@ -325,6 +325,7 @@ class BackupRunner:
         imap: imaplib.IMAP4_SSL,
         folder: str,
         state: dict[str, Any],
+        state_path: Path,
     ) -> None:
         folder_state = state.setdefault("folders", {}).setdefault(folder, {"last_uid": 0})
         last_uid = int(folder_state.get("last_uid", 0))
@@ -351,6 +352,9 @@ class BackupRunner:
             self._backup_uid(account, imap, folder, uid)
             self.progress.uid_done(account.email)
             max_uid = max(max_uid, uid)
+            folder_state["last_uid"] = max_uid
+            if not self.dry_run:
+                self._write_json_atomic(state_path, state)
 
         folder_state["last_uid"] = max_uid
         self.progress.folder_done(account.email)
@@ -453,6 +457,12 @@ class BackupRunner:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
 
 
 def setup_logging(cfg: dict[str, Any]) -> None:
