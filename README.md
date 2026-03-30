@@ -80,3 +80,17 @@ s3:
 ```bash
 python -m mail_backuper.main --config config/config.yaml --dry-run
 ```
+
+## Live-progress в реальном времени
+
+Чтобы видеть список почт, текущую папку, прогресс и итоговый статус по каждому ящику в реальном времени, запустите:
+
+```bash
+python -m mail_backuper.main --config config/config.yaml --live-progress
+```
+
+Можно комбинировать с dry-run:
+
+```bash
+python -m mail_backuper.main --config config/config.yaml --dry-run --live-progress
+```
