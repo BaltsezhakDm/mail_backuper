@@ -25,6 +25,7 @@ import boto3
 import requests
 import yaml
 from botocore.client import Config
+from requests import RequestException
 
 
 @dataclass
@@ -34,6 +35,30 @@ class Account:
     password: str
     imap_host: str
     imap_port: int
+
+
+class BackupError(RuntimeError):
+    """Base class for predictable backup errors with actionable context."""
+
+
+class VaultUnavailableError(BackupError):
+    """Vault is unreachable or returned an unexpected transport error."""
+
+
+class VaultAccountSchemaError(BackupError):
+    """Vault account secret has invalid structure."""
+
+
+class ImapFetchError(BackupError):
+    """IMAP server returned unexpected payload for a message fetch."""
+
+
+class MessageParseError(BackupError):
+    """Unable to parse raw message bytes."""
+
+
+class MessageSerializeError(BackupError):
+    """Unable to serialize message to RFC822 bytes."""
 
 
 class LiveProgress:
@@ -182,9 +207,12 @@ class VaultClient:
         if not self.role:
             raise RuntimeError("Vault jwt auth selected, but jwt_role is missing in config")
         url = f"{self.addr}/v1/auth/{self.mount}/login"
-        r = requests.post(url, json={"role": self.role, "jwt": jwt}, timeout=20)
-        r.raise_for_status()
-        self.token = r.json()["auth"]["client_token"]
+        try:
+            r = requests.post(url, json={"role": self.role, "jwt": jwt}, timeout=20)
+            r.raise_for_status()
+            self.token = r.json()["auth"]["client_token"]
+        except RequestException as exc:
+            raise VaultUnavailableError(f"Vault auth failed for {self.addr}: {exc}") from exc
 
     def _headers(self) -> dict[str, str]:
         if not self.token:
@@ -196,20 +224,28 @@ class VaultClient:
         metadata_path = self.base_path.replace("/data/", "/metadata/", 1)
         url = f"{self.addr}/v1/{metadata_path}?list=true"
         headers = self._headers()
-        if self.list_method == "get":
-            if self.list_override_header:
-                headers["X-HTTP-Method-Override"] = "LIST"
-            r = requests.get(url, headers=headers, timeout=20)
-        else:
-            r = requests.request("LIST", url, headers=headers, timeout=20)
-        r.raise_for_status()
+        try:
+            if self.list_method == "get":
+                if self.list_override_header:
+                    headers["X-HTTP-Method-Override"] = "LIST"
+                r = requests.get(url, headers=headers, timeout=20)
+            else:
+                r = requests.request("LIST", url, headers=headers, timeout=20)
+            r.raise_for_status()
+        except RequestException as exc:
+            raise VaultUnavailableError(f"Failed to list accounts from Vault: {exc}") from exc
         keys = r.json().get("data", {}).get("keys", [])
         return [k.rstrip("/") for k in keys]
 
     def read_account(self, account_key: str) -> Account:
         url = f"{self.addr}/v1/{self.base_path}/{account_key}"
-        r = requests.get(url, headers=self._headers(), timeout=20)
-        r.raise_for_status()
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=20)
+            r.raise_for_status()
+        except RequestException as exc:
+            raise VaultUnavailableError(
+                f"Failed to load account '{account_key}' from Vault at {self.addr}: {exc}"
+            ) from exc
         data = r.json()["data"]["data"]
         password = self._extract_password(account_key, data)
         return Account(
@@ -223,10 +259,12 @@ class VaultClient:
     @staticmethod
     def _extract_password(account_key: str, data: dict[str, Any]) -> str:
         value = data.get("password")
+        if not value and "passsword" in data:
+            value = data.get("passsword")
         if value:
             return str(value)
         available = ", ".join(sorted(data.keys())) if data else "<empty>"
-        raise KeyError(
+        raise VaultAccountSchemaError(
             f"Account '{account_key}' is missing required Vault field 'password'. "
             f"Available keys: {available}"
         )
@@ -369,7 +407,20 @@ class BackupRunner:
         max_uid = last_uid
         for uid_b in uid_list:
             uid = int(uid_b.decode())
-            self._backup_uid(account, imap, folder, uid)
+            try:
+                self._backup_uid(account, imap, folder, uid)
+            except BackupError as exc:
+                logging.warning("%s", exc)
+                continue
+            except Exception as exc:
+                logging.exception(
+                    "Unexpected error for %s folder=%s uid=%s: %s",
+                    account.email,
+                    folder,
+                    uid,
+                    exc,
+                )
+                continue
             self.progress.uid_done(account.email)
             max_uid = max(max_uid, uid)
             folder_state["last_uid"] = max_uid
@@ -384,8 +435,20 @@ class BackupRunner:
         if status != "OK" or not data or data[0] is None:
             return
 
-        raw = data[0][1]
-        msg = BytesParser(policy=policy.default).parsebytes(raw)
+        item = data[0]
+        if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], (bytes, bytearray)):
+            raise ImapFetchError(
+                f"IMAP FETCH returned unexpected payload type for {account.email} {folder} UID {uid}: "
+                f"{type(item).__name__}"
+            )
+
+        raw = bytes(item[1])
+        try:
+            msg = BytesParser(policy=policy.default).parsebytes(raw)
+        except Exception as exc:
+            raise MessageParseError(
+                f"Failed to parse message for {account.email} {folder} UID {uid}: {exc}"
+            ) from exc
         stripped = self._strip_attachments(msg)
         if stripped is None:
             return
@@ -398,7 +461,7 @@ class BackupRunner:
         # local_dir.mkdir(parents=True, exist_ok=True)
         # local_file = local_dir / f"{uid}.eml"
 
-        eml_bytes = self._to_bytes(stripped)
+        eml_bytes = self._to_bytes(stripped, account.email, folder, uid)
 
         # if not self.dry_run:
         #     local_file.write_bytes(eml_bytes)
@@ -467,10 +530,15 @@ class BackupRunner:
         return msg
 
     @staticmethod
-    def _to_bytes(msg) -> bytes:
+    def _to_bytes(msg, account_email: str, folder: str, uid: int) -> bytes:
         buf = BytesIO()
-        BytesGenerator(buf, policy=policy.SMTP).flatten(msg)
-        return buf.getvalue()
+        try:
+            BytesGenerator(buf, policy=policy.SMTPUTF8).flatten(msg)
+            return buf.getvalue()
+        except Exception as exc:
+            raise MessageSerializeError(
+                f"Failed to serialize message for {account_email} {folder} UID {uid}: {exc}"
+            ) from exc
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
