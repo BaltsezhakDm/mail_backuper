@@ -33,7 +33,7 @@
 - Ключи: email-адреса (`user@example.com`)
 - Значения:
   - `username`
-  - `password`
+  - `passwordqzalminveqklfxce`
   - `imap_host` (опционально, по умолчанию `imap.yandex.ru`)
   - `imap_port` (опционально, по умолчанию `993`)
 
@@ -42,4 +42,3 @@
 ```bash
 python -m mail_backuper.main --config config/config.yaml --dry-run
 ```
-
