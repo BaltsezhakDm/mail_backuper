@@ -94,3 +94,103 @@ python -m mail_backuper.main --config config/config.yaml --live-progress
 ```bash
 python -m mail_backuper.main --config config/config.yaml --dry-run --live-progress
 ```
+
+## Ежедневный запуск бэкапа
+
+Ниже — два рабочих варианта: `cron` (проще) и `systemd timer` (надежнее и удобнее для мониторинга).
+
+### Вариант 1: cron
+
+1. Убедитесь, что конфиг и секреты доступны в окружении рантайма:
+   - `config/config.yaml` заполнен.
+   - Для Vault JWT: есть `CI_JOB_JWT` или `CI_JOB_JWT_V2`, либо
+   - Для Vault token auth: задан `VAULT_TOKEN`.
+
+2. Создайте скрипт запуска `/usr/local/bin/mail-backuper-run.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /opt/mail_backuper
+/usr/bin/env python -m mail_backuper.main --config /opt/mail_backuper/config/config.yaml
+```
+
+3. Сделайте его исполняемым:
+
+```bash
+chmod +x /usr/local/bin/mail-backuper-run.sh
+```
+
+4. Добавьте cron-задачу (пример: каждый день в 19:00 по локальному времени сервера):
+
+```bash
+crontab -e
+```
+
+```cron
+0 19 * * * /usr/local/bin/mail-backuper-run.sh >> /var/log/mail-backuper-cron.log 2>&1
+```
+
+> Важно: `cron` запускается с минимальным окружением. Если нужны переменные (`VAULT_TOKEN`, AWS/S3 ключи), задайте их в скрипте или через системный механизм секретов.
+
+### Вариант 2: systemd timer (рекомендуется)
+
+1. Создайте unit-файл `/etc/systemd/system/mail-backuper.service`:
+
+```ini
+[Unit]
+Description=Mail Backuper daily run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mail_backuper
+ExecStart=/usr/bin/env python -m mail_backuper.main --config /opt/mail_backuper/config/config.yaml
+# Пример подгрузки env:
+# EnvironmentFile=/etc/mail-backuper.env
+```
+
+2. Создайте таймер `/etc/systemd/system/mail-backuper.timer`:
+
+```ini
+[Unit]
+Description=Run Mail Backuper daily at 19:00
+
+[Timer]
+OnCalendar=*-*-* 19:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+3. Активируйте таймер:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mail-backuper.timer
+```
+
+4. Проверьте статус:
+
+```bash
+systemctl status mail-backuper.timer
+systemctl list-timers | grep mail-backuper
+journalctl -u mail-backuper.service -n 100 --no-pager
+```
+
+### Проверка перед продом
+
+- Пробный запуск:
+
+```bash
+python -m mail_backuper.main --config config/config.yaml --dry-run --live-progress
+```
+
+- Боевой запуск вручную:
+
+```bash
+python -m mail_backuper.main --config config/config.yaml --live-progress
+```
