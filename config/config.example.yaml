@@ -19,6 +19,18 @@ s3:
   region: "ru-1"
   bucket: "your-bucket"
   prefix: "backups"
+  # Для закрытого бакета обычно удобнее явные ключи (если не используются AWS_* env).
+  access_key_id: "your-access-key-id"
+  secret_access_key: "your-secret-access-key"
+  session_token: null
+  # Для S3-совместимых приватных инсталляций часто нужен path-style.
+  addressing_style: "path" # auto | virtual | path
+  signature_version: "s3v4"
+  verify_ssl: true # true | false | "/path/to/ca.pem"
+  # Необязательно: серверное шифрование на стороне S3.
+  server_side_encryption: null # AES256 | aws:kms
+  sse_kms_key_id: null
+  storage_class: null
 
 logging:
   file: "/data/mail_backups/logs/backup.log"
