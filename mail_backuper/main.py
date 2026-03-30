@@ -34,9 +34,12 @@ class Account:
 class VaultClient:
     def __init__(self, cfg: dict[str, Any]):
         self.addr = cfg["addr"].rstrip("/")
-        self.role = cfg["jwt_role"]
+        self.role = cfg.get("jwt_role")
         self.base_path = cfg["accounts_base_path"].strip("/")
         self.mount = cfg.get("mount", "jwt")
+        self.auth_method = cfg.get("auth_method", "jwt").lower()
+        self.list_method = cfg.get("list_method", "list").lower()
+        self.list_override_header = bool(cfg.get("list_override_header", False))
         self.token: str | None = None
 
     def _jwt_from_env(self) -> str:
@@ -48,7 +51,18 @@ class VaultClient:
         return jwt
 
     def authenticate(self) -> None:
+        if self.auth_method == "token":
+            import os
+
+            token = os.getenv("VAULT_TOKEN")
+            if not token:
+                raise RuntimeError("Vault token auth selected, but VAULT_TOKEN is missing")
+            self.token = token
+            return
+
         jwt = self._jwt_from_env()
+        if not self.role:
+            raise RuntimeError("Vault jwt auth selected, but jwt_role is missing in config")
         url = f"{self.addr}/v1/auth/{self.mount}/login"
         r = requests.post(url, json={"role": self.role, "jwt": jwt}, timeout=20)
         r.raise_for_status()
@@ -63,7 +77,13 @@ class VaultClient:
         # KV v2 LIST uses metadata endpoint.
         metadata_path = self.base_path.replace("/data/", "/metadata/", 1)
         url = f"{self.addr}/v1/{metadata_path}?list=true"
-        r = requests.request("LIST", url, headers=self._headers(), timeout=20)
+        headers = self._headers()
+        if self.list_method == "get":
+            if self.list_override_header:
+                headers["X-HTTP-Method-Override"] = "LIST"
+            r = requests.get(url, headers=headers, timeout=20)
+        else:
+            r = requests.request("LIST", url, headers=headers, timeout=20)
         r.raise_for_status()
         keys = r.json().get("data", {}).get("keys", [])
         return [k.rstrip("/") for k in keys]

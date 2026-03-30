@@ -12,6 +12,7 @@
 - Retention локальных бэкапов (по умолчанию 30 дней).
 - Логи с ротацией и хранением 30 дней.
 - Получение секретов аккаунтов из Vault через GitLab JWT.
+- Альтернативный способ API-доступа к Vault: через `VAULT_TOKEN` и GET-listing.
 
 ## Структура данных
 
@@ -36,6 +37,14 @@
   - `passwordqzalminveqklfxce`
   - `imap_host` (опционально, по умолчанию `imap.yandex.ru`)
   - `imap_port` (опционально, по умолчанию `993`)
+
+Дополнительные режимы доступа к Vault API:
+
+- `vault.auth_method: jwt` (по умолчанию) — логин через GitLab JWT (`CI_JOB_JWT_V2`/`CI_JOB_JWT`).
+- `vault.auth_method: token` — используется токен из переменной окружения `VAULT_TOKEN`.
+- `vault.list_method: list` (по умолчанию) — HTTP-метод `LIST` для получения ключей KV v2.
+- `vault.list_method: get` — использовать `GET ...?list=true` (полезно, если `LIST` блокируется прокси).
+- `vault.list_override_header: true` — при `get` добавляет заголовок `X-HTTP-Method-Override: LIST`.
 
 ## Dry-run
 

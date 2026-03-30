@@ -27,9 +27,12 @@ logging:
 
 vault:
   addr: "https://vault.example.com"
+  auth_method: "jwt" # jwt | token
   jwt_role: "mail-backuper"
   accounts_base_path: "secret/data/mail-backup/accounts"
   mount: "jwt"
+  list_method: "list" # list | get
+  list_override_header: false # for get method sends X-HTTP-Method-Override: LIST
 
 limits:
   continue_on_account_error: true
