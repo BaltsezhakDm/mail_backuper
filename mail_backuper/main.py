@@ -4,6 +4,7 @@ import argparse
 import imaplib
 import json
 import logging
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -107,11 +108,22 @@ class BackupRunner:
         self.cfg = cfg
         self.tz = ZoneInfo(cfg["timezone"])
         self.now = datetime.now(tz=self.tz)
+        self.dry_run = dry_run or bool(cfg.get("dry_run", False))
         self.local_root = Path(cfg["storage"]["local_root"])
-        self.local_root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.local_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            fallback = Path.cwd() / ".mail_backuper_dry_run"
+            fallback.mkdir(parents=True, exist_ok=True)
+            print(
+                f"Dry-run local_root fallback to {fallback} "
+                f"(could not use {self.local_root}: {exc})",
+                file=sys.stderr,
+            )
+            self.local_root = fallback
+           
         self.skip_folders = {x.lower() for x in cfg["imap"].get("skip_folders", ["Spam"])}
         self.retry_attempts = int(cfg.get("retry_attempts", 3))
-        self.dry_run = dry_run or bool(cfg.get("dry_run", False))
 
         s3_cfg = cfg["s3"]
         self.s3_bucket = s3_cfg["bucket"]
@@ -308,24 +320,30 @@ def setup_logging(cfg: dict[str, Any]) -> None:
     log_cfg = cfg["logging"]
     level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
     log_file = Path(log_cfg["file"])
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    handler = TimedRotatingFileHandler(
-        filename=log_file,
-        when="midnight",
-        backupCount=int(log_cfg.get("retention_days", 30)),
-        encoding="utf-8",
-    )
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(threadName)s %(message)s")
-    handler.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(level)
-    root.addHandler(handler)
 
     stream = logging.StreamHandler()
     stream.setFormatter(fmt)
     root.addHandler(stream)
+
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            filename=log_file,
+            when="midnight",
+            backupCount=int(log_cfg.get("retention_days", 30)),
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError as exc:
+        print(
+            f"Logging file disabled; could not use {log_file}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def load_config(path: str) -> dict[str, Any]:

@@ -3,3 +3,5 @@ __pycache__/
 .venv
 .vscode
 config/config.yaml
+.env
+.mail_backuper_dry_run
