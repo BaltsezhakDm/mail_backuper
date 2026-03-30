@@ -1,0 +1,18 @@
+stages:
+  - backup
+
+mail_backup:
+  stage: backup
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  before_script:
+    - pip install --no-cache-dir .
+    - mkdir -p /data/mail_backups
+  script:
+    - python -m mail_backuper.main --config config/config.yaml
+  artifacts:
+    when: always
+    paths:
+      - /data/mail_backups/logs/
+    expire_in: 30 days

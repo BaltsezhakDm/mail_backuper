@@ -1,0 +1,35 @@
+timezone: "Europe/Moscow"  # UTC+3
+run_time: "19:00"
+concurrency: 4
+retry_attempts: 3
+dry_run: false
+
+imap:
+  default_host: "imap.yandex.ru"
+  default_port: 993
+  skip_folders:
+    - "Spam"
+
+storage:
+  local_root: "/data/mail_backups"
+  retention_days: 30
+
+s3:
+  endpoint_url: "https://s3.storage.selcloud.ru"
+  region: "ru-1"
+  bucket: "your-bucket"
+  prefix: "backups"
+
+logging:
+  file: "/data/mail_backups/logs/backup.log"
+  retention_days: 30
+  level: "INFO"
+
+vault:
+  addr: "https://vault.example.com"
+  jwt_role: "mail-backuper"
+  accounts_base_path: "secret/data/mail-backup/accounts"
+  mount: "jwt"
+
+limits:
+  continue_on_account_error: true

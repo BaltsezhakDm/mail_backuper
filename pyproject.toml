@@ -1,0 +1,14 @@
+[project]
+name = "mail-backuper"
+version = "0.1.0"
+description = "Incremental IMAP backup to local disk and S3"
+requires-python = ">=3.11"
+dependencies = [
+  "boto3>=1.34.0",
+  "PyYAML>=6.0",
+  "requests>=2.31.0",
+]
+
+[tool.ruff]
+line-length = 100
+
