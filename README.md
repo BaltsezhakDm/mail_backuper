@@ -19,6 +19,36 @@
 - Локально: `/data/mail_backups/<email>/YYYY/MM/DD/<folder>/<uid>.eml`
 - S3: `backups/<email>/YYYY/MM/DD/<folder>/<uid>.eml`
 
+## Закрытый S3 бакет
+
+Для приватного (непубличного) S3-бакета используйте явные параметры клиента в `s3`:
+
+- `access_key_id` / `secret_access_key` / `session_token` — учётные данные (если не берутся из `AWS_*` env).
+- `addressing_style: path` — часто нужен для S3-совместимых приватных инсталляций.
+- `signature_version: s3v4` — стандартная подпись запросов.
+- `verify_ssl` — `true`, `false` или путь до кастомного CA (`/path/to/ca.pem`) для внутреннего TLS.
+- `server_side_encryption` / `sse_kms_key_id` — если бакет требует SSE (`AES256` или `aws:kms`).
+- `storage_class` — при необходимости принудительного класса хранения.
+
+Пример блока:
+
+```yaml
+s3:
+  endpoint_url: "https://s3.example.internal"
+  region: "ru-1"
+  bucket: "private-mail-backups"
+  prefix: "backups"
+  access_key_id: "${S3_ACCESS_KEY_ID}"
+  secret_access_key: "${S3_SECRET_ACCESS_KEY}"
+  session_token: null
+  addressing_style: "path"
+  signature_version: "s3v4"
+  verify_ssl: "/etc/ssl/certs/internal-ca.pem"
+  server_side_encryption: "AES256"
+  sse_kms_key_id: null
+  storage_class: null
+```
+
 ## Настройка
 
 1. Скопируйте `config/config.example.yaml` в `config/config.yaml`.

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import requests
 import yaml
+from botocore.client import Config
 
 
 @dataclass
@@ -128,10 +129,21 @@ class BackupRunner:
         s3_cfg = cfg["s3"]
         self.s3_bucket = s3_cfg["bucket"]
         self.s3_prefix = s3_cfg["prefix"].strip("/")
+        s3_addressing_style = s3_cfg.get("addressing_style", "auto")
+        s3_client_config = Config(
+            signature_version=s3_cfg.get("signature_version", "s3v4"),
+            s3={"addressing_style": s3_addressing_style},
+        )
+        self.s3_put_extra_args = self._build_s3_put_extra_args(s3_cfg)
         self.s3 = boto3.client(
             "s3",
             endpoint_url=s3_cfg["endpoint_url"],
             region_name=s3_cfg.get("region"),
+            aws_access_key_id=s3_cfg.get("access_key_id"),
+            aws_secret_access_key=s3_cfg.get("secret_access_key"),
+            aws_session_token=s3_cfg.get("session_token"),
+            verify=s3_cfg.get("verify_ssl", True),
+            config=s3_client_config,
         )
 
     def run(self) -> None:
@@ -238,7 +250,29 @@ class BackupRunner:
 
         s3_key = f"{self.s3_prefix}/{account.email}/{day_path}/{folder_sane}/{uid}.eml"
         if not self.dry_run:
-            self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=eml_bytes)
+            self.s3.put_object(
+                Bucket=self.s3_bucket,
+                Key=s3_key,
+                Body=eml_bytes,
+                **self.s3_put_extra_args,
+            )
+
+    @staticmethod
+    def _build_s3_put_extra_args(s3_cfg: dict[str, Any]) -> dict[str, Any]:
+        args: dict[str, Any] = {}
+        sse = s3_cfg.get("server_side_encryption")
+        if sse:
+            args["ServerSideEncryption"] = sse
+
+        kms_key_id = s3_cfg.get("sse_kms_key_id")
+        if kms_key_id:
+            args["SSEKMSKeyId"] = kms_key_id
+
+        storage_class = s3_cfg.get("storage_class")
+        if storage_class:
+            args["StorageClass"] = storage_class
+
+        return args
 
     def apply_retention(self) -> None:
         days = int(self.cfg["storage"].get("retention_days", 30))
