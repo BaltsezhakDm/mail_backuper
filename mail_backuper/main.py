@@ -4,6 +4,7 @@ import argparse
 import imaplib
 import json
 import logging
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -181,7 +182,6 @@ class BackupRunner:
             status, folders = imap.list()
             if status != "OK":
                 raise RuntimeError(f"Cannot list folders for {account.email}")
-
             for folder_raw in folders:
                 folder_name = self._extract_folder_name(folder_raw.decode("utf-8", errors="ignore"))
                 if not folder_name or folder_name.lower() in self.skip_folders:
@@ -274,34 +274,17 @@ class BackupRunner:
 
         return args
 
-    def apply_retention(self) -> None:
-        days = int(self.cfg["storage"].get("retention_days", 30))
-        threshold = self.now.date() - timedelta(days=days)
-
-        for email_dir in [p for p in self.local_root.iterdir() if p.is_dir() and not p.name.startswith("_")]:
-            for year_dir in [p for p in email_dir.iterdir() if p.is_dir() and p.name.isdigit()]:
-                for month_dir in [p for p in year_dir.iterdir() if p.is_dir() and p.name.isdigit()]:
-                    for day_dir in [p for p in month_dir.iterdir() if p.is_dir() and p.name.isdigit()]:
-                        try:
-                            d = datetime(
-                                year=int(year_dir.name),
-                                month=int(month_dir.name),
-                                day=int(day_dir.name),
-                                tzinfo=self.tz,
-                            ).date()
-                        except ValueError:
-                            continue
-                        if d < threshold:
-                            logging.info("Removing old local backup: %s", day_dir)
-                            if not self.dry_run:
-                                self._rm_tree(day_dir)
 
     @staticmethod
     def _extract_folder_name(line: str) -> str:
-        parts = line.split(' "/" ')
-        if len(parts) < 2:
+        line = line.strip()
+        m = re.match(r'^\((?P<flags>[^)]*)\)\s+(?P<delim>NIL|"[^"]*")\s+(?P<name>.+)$', line)
+        if not m:
             return ""
-        return parts[-1].strip('"')
+        name = m.group("name").strip()
+        if name.startswith('"') and name.endswith('"') and len(name) >= 2:
+            name = name[1:-1].replace(r"\\", "\\").replace(r"\"", '"')
+        return name
 
     @staticmethod
     def _mail_date(msg) -> datetime:
@@ -339,15 +322,6 @@ class BackupRunner:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
-
-    @staticmethod
-    def _rm_tree(path: Path) -> None:
-        for p in sorted(path.rglob("*"), reverse=True):
-            if p.is_file() or p.is_symlink():
-                p.unlink(missing_ok=True)
-            elif p.is_dir():
-                p.rmdir()
-        path.rmdir()
 
 
 def setup_logging(cfg: dict[str, Any]) -> None:
