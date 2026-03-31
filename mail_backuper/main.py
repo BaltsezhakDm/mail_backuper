@@ -61,6 +61,10 @@ class MessageSerializeError(BackupError):
     """Unable to serialize message to RFC822 bytes."""
 
 
+class AccountLoginError(BackupError):
+    """Unable to authenticate to IMAP for an account."""
+
+
 class LiveProgress:
     def __init__(self, enabled: bool):
         self.enabled = enabled and sys.stdout.isatty()
@@ -69,22 +73,23 @@ class LiveProgress:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
 
+    @staticmethod
+    def _default_account_data() -> dict[str, Any]:
+        return {
+            "status": "queued",
+            "folders_done": 0,
+            "folders_total": 0,
+            "emails_done": 0,
+            "emails_total": 0,
+            "current_folder": "-",
+            "updated_at": time.time(),
+        }
+
     def start(self, account_keys: list[str]) -> None:
         if not self.enabled:
             return
         with self.lock:
-            self.accounts = {
-                key: {
-                    "status": "queued",
-                    "folders_done": 0,
-                    "folders_total": 0,
-                    "emails_done": 0,
-                    "emails_total": 0,
-                    "current_folder": "-",
-                    "updated_at": time.time(),
-                }
-                for key in account_keys
-            }
+            self.accounts = {key: self._default_account_data() for key in account_keys}
         self.thread = threading.Thread(target=self._render_loop, daemon=True, name="progress")
         self.thread.start()
 
@@ -98,6 +103,8 @@ class LiveProgress:
         print()
 
     def account_started(self, account_email: str, folders_total: int) -> None:
+        if not self.enabled:
+            return
         self._update(
             account_email,
             status="running",
@@ -106,34 +113,46 @@ class LiveProgress:
         )
 
     def folder_started(self, account_email: str, folder: str, emails_total: int) -> None:
+        if not self.enabled:
+            return
         with self.lock:
-            data = self.accounts[account_email]
+            data = self.accounts.setdefault(account_email, self._default_account_data())
             data["current_folder"] = folder
             data["emails_total"] += emails_total
             data["updated_at"] = time.time()
 
     def uid_done(self, account_email: str) -> None:
+        if not self.enabled:
+            return
         with self.lock:
-            data = self.accounts[account_email]
+            data = self.accounts.setdefault(account_email, self._default_account_data())
             data["emails_done"] += 1
             data["updated_at"] = time.time()
 
     def folder_done(self, account_email: str) -> None:
+        if not self.enabled:
+            return
         with self.lock:
-            data = self.accounts[account_email]
+            data = self.accounts.setdefault(account_email, self._default_account_data())
             data["folders_done"] += 1
             data["current_folder"] = "-"
             data["updated_at"] = time.time()
 
     def account_done(self, account_email: str) -> None:
+        if not self.enabled:
+            return
         self._update(account_email, status="done", current_folder="-")
 
     def account_failed(self, account_email: str) -> None:
+        if not self.enabled:
+            return
         self._update(account_email, status="failed", current_folder="-")
 
     def _update(self, account_email: str, **kwargs: Any) -> None:
+        if not self.enabled:
+            return
         with self.lock:
-            data = self.accounts.setdefault(account_email, {})
+            data = self.accounts.setdefault(account_email, self._default_account_data())
             data.update(kwargs)
             data["updated_at"] = time.time()
 
@@ -322,6 +341,8 @@ class BackupRunner:
 
         concurrency = int(self.cfg.get("concurrency", 4))
         continue_on_error = bool(self.cfg.get("limits", {}).get("continue_on_account_error", True))
+        completed_accounts = 0
+        failed_accounts = 0
 
         try:
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -330,6 +351,7 @@ class BackupRunner:
                     try:
                         account = vault.read_account(key)
                     except Exception as exc:
+                        failed_accounts += 1
                         self.progress.account_failed(key)
                         logging.exception("Failed to load account %s from Vault: %s", key, exc)
                         if not continue_on_error:
@@ -340,13 +362,28 @@ class BackupRunner:
                     key = futures[f]
                     try:
                         f.result()
+                        completed_accounts += 1
+                        logging.info("Account %s finished successfully", key)
+                    except BackupError as exc:
+                        failed_accounts += 1
+                        self.progress.account_failed(key)
+                        logging.error("Account %s failed: %s", key, exc)
+                        if not continue_on_error:
+                            raise
                     except Exception as exc:
+                        failed_accounts += 1
                         self.progress.account_failed(key)
                         logging.exception("Account %s failed: %s", key, exc)
                         if not continue_on_error:
                             raise
         finally:
             self.progress.stop()
+        logging.info(
+            "Backup run finished: successful=%d failed=%d total=%d",
+            completed_accounts,
+            failed_accounts,
+            len(keys),
+        )
 
     def backup_one_account(self, account: Account) -> None:
         logging.info("Start backup for %s", account.email)
@@ -355,7 +392,12 @@ class BackupRunner:
         state = self._read_json(state_path)
 
         with imaplib.IMAP4_SSL(account.imap_host, account.imap_port) as imap:
-            imap.login(account.username, account.password)
+            try:
+                imap.login(account.username, account.password)
+            except imaplib.IMAP4.error as exc:
+                raise AccountLoginError(
+                    f"IMAP login failed for {account.email}: {exc}"
+                ) from exc
             status, folders = imap.list()
             if status != "OK":
                 raise RuntimeError(f"Cannot list folders for {account.email}")
